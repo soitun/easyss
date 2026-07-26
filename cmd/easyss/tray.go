@@ -315,10 +315,15 @@ func (a *TrayApp) addProxyObjectMenu() (*systray.MenuItem, *systray.MenuItem) {
 			case <-global.ClickedCh:
 				if global.Checked() {
 					if !IsRoot() {
-						if err := removeTunKeepalive(); err != nil && !os.IsNotExist(err) {
-							log.Error("[SYSTRAY] remove tun keepalive", "err", err)
+						if runtime.GOOS == "darwin" {
+							_ = a.closeTun2socks()
+							_ = a.closeTunRoutesAndDNS()
+						} else {
+							if err := a.closeTun2socks(); err != nil {
+								log.Error("[SYSTRAY] close tun2socks", "err", err)
+								continue
+							}
 						}
-						a.cfg.Local.EnableTun2socks = false
 					} else {
 						if err := a.closeTun2socks(); err != nil {
 							log.Error("[SYSTRAY] close tun2socks", "err", err)
@@ -328,17 +333,19 @@ func (a *TrayApp) addProxyObjectMenu() (*systray.MenuItem, *systray.MenuItem) {
 					global.Uncheck()
 				} else {
 					if !IsRoot() {
-						if err := writeTunKeepalive(); err != nil {
-							log.Error("[SYSTRAY] write tun keepalive", "err", err)
-							continue
+						if runtime.GOOS == "darwin" {
+							tunFD, devName, err := a.launchTunHelper()
+							if err != nil {
+								log.Error("[SYSTRAY] launch tun helper", "err", err)
+								continue
+							}
+							a.createTun2socksWithFD(tunFD, devName)
+						} else {
+							if err := a.createTun2socks(); err != nil {
+								log.Error("[SYSTRAY] create tun2socks", "err", err)
+								continue
+							}
 						}
-						if err := RunMeElevated("-tun-only", "-tun-parent-pid",
-							fmt.Sprintf("%d", os.Getpid()), "-c", a.configFile); err != nil {
-							log.Error("[SYSTRAY] run me elevated for tun", "err", err)
-							_ = removeTunKeepalive()
-							continue
-						}
-						a.cfg.Local.EnableTun2socks = true
 					} else {
 						if err := a.createTun2socks(); err != nil {
 							log.Error("[SYSTRAY] create tun2socks", "err", err)

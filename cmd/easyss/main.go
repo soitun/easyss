@@ -28,10 +28,9 @@ import (
 )
 
 func main() {
-	var printVer, showConfigExample, showConfigExampleSimple, daemon, disableTray, enableTun2socks, tunOnly bool
+	var printVer, showConfigExample, showConfigExampleSimple, daemon, disableTray, enableTun2socks, tunHelper bool
 	var configFile, cmdOutboundProto string
 	var pprofEnabled bool
-	var tunParentPID int
 
 	sc := &sharedconfig.SimpleConfig{}
 
@@ -53,8 +52,7 @@ func main() {
 	flag.BoolVar(&daemon, "daemon", runtime.GOOS != "windows", "run app as daemon")
 	flag.BoolVar(&disableTray, "disable-tray", false, "disable system tray (windows/mac only)")
 	flag.BoolVar(&enableTun2socks, "enable-tun2socks", false, "enable tun2socks model")
-	flag.BoolVar(&tunOnly, "tun-only", false, "run TUN manager only (macOS privilege separation)")
-	flag.IntVar(&tunParentPID, "tun-parent-pid", 0, "parent PID for tun-only keepalive monitoring")
+	flag.BoolVar(&tunHelper, "tun-helper", false, "run one-shot TUN helper (macOS privilege separation)")
 	flag.StringVar(&sc.IPV6Rule, "ipv6-rule", "", "set the ipv6 rule(auto, enable, disable), default: auto")
 	flag.StringVar(&sc.DirectFile, "direct-file", "", "custom direct file (IPs/CIDRs/domains/regexps mixed, one per line; supports regexp: prefix and * glob)")
 	flag.StringVar(&sc.ProxyFile, "proxy-file", "", "custom proxy file (IPs/CIDRs/domains/regexps mixed, one per line; supports regexp: prefix and * glob)")
@@ -112,13 +110,6 @@ func main() {
 	log.Init(cfg.Log.FilePath, cfg.Log.Level)
 	log.Info("[EASYSS-V3] " + version.String())
 
-	// Make config file path absolute for the tun-only helper
-	if !filepath.IsAbs(configFile) {
-		if abs, err := filepath.Abs(configFile); err == nil {
-			configFile = abs
-		}
-	}
-
 	if enableTun2socks {
 		cfg.Local.EnableTun2socks = true
 	}
@@ -144,9 +135,10 @@ func main() {
 		"timeout", cfg.Timeout,
 	)
 
-	app := &App{cfg: cfg, configFile: configFile}
-	if tunOnly {
-		runTunOnly(cfg, tunKeepaliveFile, tunParentPID)
+	app := &App{cfg: cfg}
+	if tunHelper {
+		connFD, tunIP, tunGW, localGW, tunIPV6Sub, tunGWV6, serverIPV6, localGWV6, dnsServer := parseTunHelperArgs()
+		runTunHelper(connFD, tunIP, tunGW, localGW, tunIPV6Sub, tunGWV6, serverIPV6, localGWV6, dnsServer)
 		return
 	}
 	runApp(disableTray, daemon, app)
@@ -159,11 +151,10 @@ func sigWait() {
 }
 
 type App struct {
-	cfg        *config.ClientConfig
-	configFile string // absolute path to config file
-	core       *runner.Core
-	tunMgr     *tun.Manager
-	pprofSrv   *http.Server
+	cfg      *config.ClientConfig
+	core     *runner.Core
+	tunMgr   *tun.Manager
+	pprofSrv *http.Server
 
 	statsCloser chan struct{}
 	statsOnce   sync.Once

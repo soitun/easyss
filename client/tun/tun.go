@@ -55,6 +55,7 @@ type Manager struct {
 	dev       DeviceConfig
 	running   bool
 	originDNS []string // original system DNS before TUN starts (darwin only)
+	fdMode    bool     // true when using a pre-created fd (macOS privilege separation)
 
 	ctx    context.Context    // cancels an in-progress Start()
 	cancel context.CancelFunc // stored so Stop() can cancel the Start() goroutine
@@ -203,6 +204,61 @@ func (m *Manager) Start(icmpH adapter.NetworkHandler) error {
 	return nil
 }
 
+// StartWithFD starts the TUN manager using a pre-created file descriptor and device name.
+// The fd is obtained from a privileged helper via SCM_RIGHTS on macOS. In this mode,
+// DNS and route setup are handled externally (by the helper), so they are skipped here.
+func (m *Manager) StartWithFD(tunFD int, deviceName string, icmpH adapter.NetworkHandler) error {
+	if scripts.CreateTunBytes == nil || scripts.CloseTunBytes == nil {
+		return fmt.Errorf("tun: unsupported os %s", runtime.GOOS)
+	}
+
+	m.dev.Device = deviceName
+	m.fdMode = true
+
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.done = make(chan struct{})
+	defer close(m.done)
+
+	select {
+	case <-m.ctx.Done():
+		return m.ctx.Err()
+	default:
+	}
+
+	if icmpH != nil {
+		engine.SetICMPHandler(icmpH)
+	}
+
+	key := &engine.Key{
+		MTU:                      m.cfg.MTU,
+		Device:                   fmt.Sprintf("fd://%d", tunFD),
+		LogLevel:                 m.cfg.LogLevel,
+		UDPTimeout:               m.cfg.UDPTimeout,
+		Proxy:                    m.cfg.Socks5Addr,
+		TCPModerateReceiveBuffer: true,
+		TCPSendBufferSize:        tunTCPSendBufferSize,
+		TCPReceiveBufferSize:     tunTCPReceiveBufferSize,
+	}
+
+	engine.Insert(key)
+	engine.Start()
+
+	select {
+	case <-m.ctx.Done():
+		engine.Stop()
+		return m.ctx.Err()
+	default:
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	// DNS and route setup are done by the helper.
+
+	m.running = true
+	log.Info("[TUN] tun2socks started (fd mode)", "fd", tunFD, "device", deviceName, "proxy", m.cfg.Socks5Addr)
+	return nil
+}
+
 func (m *Manager) Stop() {
 	// If Start() is still in progress, cancel it and wait for it to
 	// finish cleaning up before we proceed.
@@ -217,12 +273,14 @@ func (m *Manager) Stop() {
 
 	engine.Stop()
 
-	_ = m.closeTunDevAndDelIPRoute()
+	if !m.fdMode {
+		_ = m.closeTunDevAndDelIPRoute()
 
-	// Restore original DNS on darwin.
-	if runtime.GOOS == "darwin" {
-		if err := m.restoreDNS(); err != nil {
-			log.Warn("[TUN] restore system dns", "err", err)
+		// Restore original DNS on darwin.
+		if runtime.GOOS == "darwin" {
+			if err := m.restoreDNS(); err != nil {
+				log.Warn("[TUN] restore system dns", "err", err)
+			}
 		}
 	}
 
